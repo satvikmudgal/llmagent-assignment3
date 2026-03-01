@@ -85,7 +85,7 @@ class MCPClient:
 
         while True:
             response = self.genai_client.models.generate_content(
-                model="gemini-2.5-flash-001",
+                model="gemini-2.5-flash",
                 contents=contents,
                 config=types.GenerateContentConfig(tools=self.function_declarations),
             )

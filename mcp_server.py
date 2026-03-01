@@ -39,46 +39,19 @@ async def handle_list_tools():
                         "type": "string",
                         "enum": ["skyline", "landmark", "attraction", "general", "city", "nature"],
                         "description": "Optional. Type of images to feature. Defaults to general city images if not specified."
+                    },
+                    "cuisine": {
+                        "type": "string",
+                        "description": "Optional. Filter restaurants by cuisine type e.g. italian, chinese, mexican, japanese."
+                    },
+                    "attraction_type": {
+                        "type": "string",
+                        "description": "Optional. Filter attractions by type e.g. museum, gallery, viewpoint, artwork, hotel."
                     }
                 },
                 "required": ["city_name"]
             },
         ),
-        # types.Tool(
-        #     name="get_tourist_attraction",
-        #     description="Returns a list of attractions with addresses and hours of operation",
-        #     inputSchema={
-        #         "type": "object",
-        #         "properties": {
-        #             "city": {"type": "string"},
-        #         },
-        #         "required": ["city"]
-        #     },
-        # ),
-        # types.Tool(
-        #     name="get_restaurants_by_cuisine",
-        #     description="Returns top-rated restaurants grouped by cuisine type.",
-        #     inputSchema={
-        #         "type": "object",
-        #         "properties": {
-        #             "city": {"type": "string"},
-        #             "cuisines": {"type": "array", "items": {"type": "string"}}
-        #         },
-        #         "required": ["city", "cuisines"]
-        #     },
-        # ),
-        # types.Tool(
-        #     name="get_weather_widget",
-        #     description="Fetches current weather and returns a pre-formatted HTML widget",
-        #     inputSchema={
-        #         "type": "object",
-        #         "properties": {
-        #             "city": {"type": "string"},
-        #         },
-        #         "required": ["city"]
-        #     },
-        # ),
-
     ]
 
 @server.call_tool()
@@ -89,13 +62,18 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
     if  name == "generate_brochure":
         city_name = arguments.get("city_name")
         query_type = arguments.get("query_type", "city")
+        cuisine = arguments.get("cuisine", None)
+        attraction_type = arguments.get("attraction_type", None)
         
         image_urls = fetch_unsplash_images(city_name, query_type)
         weather = fetch_nws_weather(city_name)
         if "error" in weather:
             weather = {"temperature": "N/A", "conditions": "Unavailable", "wind": "N/A", "alerts": []}
 
-        html = build_brochure_html(city_name, image_urls, weather)
+        restaurants = fetch_restaurants(city_name, cuisine)
+        attractions = fetch_tourist_attractions(city_name, attraction_type)
+
+        html = build_brochure_html(city_name, image_urls, weather, restaurants, attractions)
 
         global HTML_CONTENT
         HTML_CONTENT = html 
@@ -197,7 +175,108 @@ def fetch_nws_weather(city: str) -> dict:
         "alerts": alerts
     }
 
-def build_brochure_html(city: str, image_urls: list[str], weather: dict) -> str:
+def fetch_restaurants(city: str, cuisine: str = None, count: int = 8) -> list[dict]:
+    """
+    Fetches restaurants from OpenStreetMap via the Overpass API
+    Optionally filters by cuisine type.
+    """
+
+    geo_response = requests.get(
+        "https://nominatim.openstreetmap.org/search",
+        params={"q": city, "format": "json", "limit": 1},
+        headers={"User-Agent": "city-brochure-app/1.0"}
+    )
+    geo_data = geo_response.json()
+    if not geo_data:
+        return []
+    
+    bbox = geo_data[0]["boundingbox"]
+    south, north, west, east = bbox
+
+    cuisine_filter = f'["cuisine"="{cuisine.lower()}"]' if cuisine else '["cuisine"]'
+
+    overpass_query = f"""
+    [out:json];
+    node["amenity"="restaurant"]{cuisine_filter}
+    ({south},{west},{north},{east});
+    out {count};
+    """
+
+    overpass_response = requests.post(
+        "https://overpass-api.de/api/interpreter",
+        data={"data": overpass_query},
+        headers={"User-Agent": "city-brochure-app/1.0"}
+    )
+    overpass_data = overpass_response.json()
+
+    restaurants = []
+    for element in overpass_data.get("elements", []):
+        tags = element.get("tags", {})
+        name = tags.get("name")
+        if not name:
+            continue
+        restaurants.append({
+            "name": name,
+            "cuisine": tags.get("cuisine", "Various").replace(";", ", ").title(),
+            "address": tags.get("addr:street", "") + " " + tags.get("addr:housenumber", ""),
+            "phone": tags.get("phone", ""),
+            "website": tags.get("website", ""),
+            "opening_hours": tags.get("opening_hours", "")
+        })
+
+    return restaurants
+
+def fetch_tourist_attractions(city: str, attraction_type: str = None, count: int = 8) -> list[dict]:
+    """Fetches tourist attractions from OpenStreetMap via the Overpass API.
+    Optionally filters by attraction type.
+    """
+    geo_response = requests.get(
+        "https://nominatim.openstreetmap.org/search",
+        params={"q": city, "format": "json", "limit": 1},
+        headers={"User-Agent": "city-brochure-app/1.0"}
+    )
+    geo_data = geo_response.json()
+    if not geo_data:
+        return []
+
+    bbox = geo_data[0]["boundingbox"]
+    south, north, west, east = bbox
+
+    type_filter = f'["tourism"="{attraction_type.lower()}"]' if attraction_type else '["tourism"]'
+
+    overpass_query = f"""
+    [out:json];
+    node{type_filter}
+    ({south},{west},{north},{east});
+    out {count};
+    """
+
+    overpass_response = requests.post(
+        "https://overpass-api.de/api/interpreter",
+        data={"data": overpass_query},
+        headers={"User-Agent": "city-brochure-app/1.0"}
+    )
+    overpass_data = overpass_response.json()
+
+    attractions = []
+    for element in overpass_data.get("elements", []):
+        tags = element.get("tags", {})
+        name = tags.get("name")
+        if not name:
+            continue
+        attractions.append({
+            "name": name,
+            "type": tags.get("tourism", "Attraction").replace("_", " ").title(),
+            "address": (tags.get("addr:street", "") + " " + tags.get("addr:housenumber", "")).strip(),
+            "description": tags.get("description", ""),
+            "website": tags.get("website", ""),
+            "opening_hours": tags.get("opening_hours", "")
+        })
+
+    return attractions
+
+
+def build_brochure_html(city: str, image_urls: list[str], weather: dict, restaurants: list[dict], attractions: list[dict]) -> str:
     count = len(image_urls)
 
     if count == 1:
@@ -215,94 +294,174 @@ def build_brochure_html(city: str, image_urls: list[str], weather: dict) -> str:
     )
 
     if weather.get("alerts"):
-        alerts_html = "".join(
-            f'<div style="background:#e74c3c; color:white; padding: 4px 8px; border-radius:4px; margin-top:4px; font-size:0.75em;">⚠ {alert}</div>'
+        alerts_html = " | ".join(
+            f'<span style="color:#e74c3c;">⚠ {alert}</span>'
             for alert in weather["alerts"]
         )
     else:
-        alerts_html = '<div style="font-size:0.75em; opacity:0.8; margin-top:4px;">No active alerts</div>'
+        alerts_html = '<span style="opacity:0.7;">None</span>'
 
     weather_widget = f"""
     <div style="
-        position: absolute;
-        top: 20px;
-        right: 24px;
-        background: rgba(0,0,0,0.45);
-        border: 1px solid rgba(255,255,255,0.2);
-        border-radius: 12px;
-        padding: 14px 18px;
+        width: 100%;
+        background: #2c3e50;
+        border-top: 1px solid rgba(255,255,255,0.1);
+        border-bottom: 1px solid rgba(255,255,255,0.1);
         color: white;
-        min-width: 180px;
-        backdrop-filter: blur(4px);
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: 48px;
+        padding: 18px 40px;
+        box-sizing: border-box;
+        flex-wrap: wrap;
     ">
-        <div style="font-size:0.8em; text-transform:uppercase; letter-spacing:1px; opacity:0.7;">Current Weather</div>
-        <div style="font-size:2em; font-weight:bold; margin: 4px 0;">{weather.get('temperature', 'N/A')}</div>
-        <div style="font-size:0.9em;">{weather.get('conditions', 'N/A')}</div>
-        <div style="font-size:0.8em; opacity:0.8; margin-top:4px;"> {weather.get('wind', 'N/A')}</div>
-        {alerts_html}
-    </div>
-    """
-    return f"""
-<!DOCTYPE html>
-<html>
-<head>
-    <title>{city} Travel Brochure</title>
-    <style>
-        body {{
-            font-family: Georgia, serif;
-            margin: 0;
-            padding: 0;
-            background: #fafafa;
-            color: #222;
-        }}
-        .hero {{
-            position: relative;
-            background: #2c3e50;
-            color: white;
-            text-align: center;
-            padding: 60px 20px;
-        }}
-        .hero h1 {{
-            font-size: 3em;
-            margin: 0;
-            letter-spacing: 2px;
-        }}
-        .hero p {{
-            font-size: 1.2em;
-            opacity: 0.8;
-        }}
-        .section {{
-            max-width: 1100px;
-            margin: 40px auto;
-            padding: 0 20px;
-        }}
-        .image-grid {{
-            display: grid;
-            {grid_style}
-            gap: 16px;
-            margin-top: 20px;
-        }}
-        h2 {{
-            border-bottom: 2px solid #2c3e50;
-            padding-bottom: 8px;
-        }}
-    </style>
-</head>
-<body>
-    <div class="hero">
-        <h1>{city}</h1>
-        <p>Discover the beauty and culture of {city}</p>
-        {weather_widget}
-    </div>
-    <div class="section">
-        <h2>Gallery</h2>
-        <div class="image-grid">
-            {images_html}
+        <div style="text-align:center;">
+            <div style="font-size:0.7em; text-transform:uppercase; letter-spacing:1px; opacity:0.6;">Temperature</div>
+            <div style="font-size:1.6em; font-weight:bold;">{weather.get('temperature', 'N/A')}</div>
+        </div>
+        <div style="text-align:center;">
+            <div style="font-size:0.7em; text-transform:uppercase; letter-spacing:1px; opacity:0.6;">Conditions</div>
+            <div style="font-size:1.1em;">{weather.get('conditions', 'N/A')}</div>
+        </div>
+        <div style="text-align:center;">
+            <div style="font-size:0.7em; text-transform:uppercase; letter-spacing:1px; opacity:0.6;">Wind</div>
+            <div style="font-size:1.1em;">{weather.get('wind', 'N/A')}</div>
+        </div>
+        <div style="text-align:center;">
+            <div style="font-size:0.7em; text-transform:uppercase; letter-spacing:1px; opacity:0.6;">Alerts</div>
+            <div style="font-size:0.9em;">{alerts_html}</div>
         </div>
     </div>
-</body>
-</html>
-"""
+    """
+
+    if restaurants:
+        restaurant_cards = "".join(f"""
+        <div style="
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        ">
+            <div style="font-size:1.1em; font-weight:bold; color:#2c3e50;">{r['name']}</div>
+            <div style="font-size:0.85em; color:#e67e22; font-style:italic;">{r['cuisine']}</div>
+            {'<div style="font-size:0.82em; color:#666;">' + r['address'].strip() + '</div>' if r['address'].strip() else ''}
+            {'<div style="font-size:0.82em; color:#666;"> ' + r['phone'] + '</div>' if r['phone'] else ''}
+            {'<div style="font-size:0.82em; color:#666;"> ' + r['opening_hours'] + '</div>' if r['opening_hours'] else ''}
+            {'<div style="font-size:0.82em;"><a href="' + r['website'] + '" style="color:#2980b9;" target="_blank"> Website</a></div>' if r['website'] else ''}
+        </div>
+        """ for r in restaurants)
+
+        restaurants_section = f"""
+        <div class="section">
+            <h2>Where to Eat</h2>
+            <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap:16px; margin-top:20px;">
+                {restaurant_cards}
+            </div>
+        </div>
+        """
+    else:
+        restaurants_section = ""
+
+    if attractions:
+        attraction_cards = "".join(f"""
+        <div style="
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        ">
+            <div style="font-size:1.1em; font-weight:bold; color:#2c3e50;">{a['name']}</div>
+            <div style="font-size:0.85em; color:#27ae60; font-style:italic;">{a['type']}</div>
+            {'<div style="font-size:0.82em; color:#666;">' + a['address'] + '</div>' if a['address'] else ''}
+            {'<div style="font-size:0.82em; color:#555;">' + a['description'] + '</div>' if a['description'] else ''}
+            {'<div style="font-size:0.82em; color:#666;">' + a['opening_hours'] + '</div>' if a['opening_hours'] else ''}
+            {'<div style="font-size:0.82em;"><a href="' + a['website'] + '" style="color:#2980b9;" target="_blank">Website</a></div>' if a['website'] else ''}
+        </div>
+        """ for a in attractions)
+
+        attractions_section = f"""
+        <div class="section">
+            <h2>Things to Do</h2>
+            <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap:16px; margin-top:20px;">
+                {attraction_cards}
+            </div>
+        </div>
+        """
+    else:
+        attractions_section = ""
+
+
+    return f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>{city} Travel Brochure</title>
+            <style>
+                body {{
+                    font-family: Georgia, serif;
+                    margin: 0;
+                    padding: 0;
+                    background: #fafafa;
+                    color: #222;
+                }}
+                .hero {{
+                    position: relative;
+                    background: #2c3e50;
+                    color: white;
+                    text-align: center;
+                    padding: 60px 20px;
+                }}
+                .hero h1 {{
+                    font-size: 3em;
+                    margin: 0;
+                    letter-spacing: 2px;
+                }}
+                .hero p {{
+                    font-size: 1.2em;
+                    opacity: 0.8;
+                }}
+                .section {{
+                    max-width: 1100px;
+                    margin: 40px auto;
+                    padding: 0 20px;
+                }}
+                .image-grid {{
+                    display: grid;
+                    {grid_style}
+                    gap: 16px;
+                    margin-top: 20px;
+                }}
+                h2 {{
+                    border-bottom: 2px solid #2c3e50;
+                    padding-bottom: 8px;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="hero">
+                <h1>{city}</h1>
+                <p>Discover the beauty and culture of {city}</p>
+            </div>
+            {weather_widget}
+
+            <div class="section">
+                <h2>Gallery</h2>
+                <div class="image-grid">
+                    {images_html}
+                </div>
+            </div>
+            {attractions_section}
+            {restaurants_section}
+        </body>
+        </html>
+        """
 
 
 async def main():

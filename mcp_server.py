@@ -73,7 +73,15 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
         restaurants = fetch_restaurants(city_name, cuisine)
         attractions = fetch_tourist_attractions(city_name, attraction_type)
 
-        html = build_brochure_html(city_name, image_urls, weather, restaurants, attractions)
+        #html = build_brochure_html(city_name, image_urls, weather, restaurants, attractions)
+
+        data_package = {
+            "images": image_urls,
+            "weather": weather,
+            "restaurants": restaurants,
+            "attractions": attractions
+        }
+        html = generate_dynamic_html(city_name, data_package)
 
         global HTML_CONTENT
         HTML_CONTENT = html 
@@ -275,193 +283,228 @@ def fetch_tourist_attractions(city: str, attraction_type: str = None, count: int
 
     return attractions
 
+def generate_dynamic_html(city, data_package):
+    """Uses Gemini to turn raw data into a presentable HTML string."""
+    from google import genai
 
-def build_brochure_html(city: str, image_urls: list[str], weather: dict, restaurants: list[dict], attractions: list[dict]) -> str:
-    count = len(image_urls)
+    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-    if count == 1:
-        grid_style = "grid-template-columns: 1fr;"
-    elif count == 2:
-        grid_style = "grid-template-columns: 1fr 1fr;"
-    elif count == 3:
-        grid_style = "grid-template-columns: 1fr 1fr 1fr;"
-    else:
-        grid_style = "grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));"
+    prompt = f"""
+    You are an expert Frontend Web Designer.
+    Task: Create a stunning, HTML/CSS travel brochure for {city}.
+
+    Data to include:
+    {data_package}
+
+    Requirements:
+    - Use modern, responsive CSS (Flexbox/Grid).
+    - Include a high-end 'hero' section using the first Unsplash image.
+    - Create distinct sections for the Image Gallery, Weather, Attractions, and Restaurants.
+    - Use a color palette that fits the 'vibe' of the city.
+    - Return ONLY the raw HTML code. No markdown code blocks.
+    """
     
-    images_html = "".join(
-        f'<img src="{url}" style="width:100%; height:220px; object-fit:cover; border-radius:8px;"/>'
-        for url in image_urls
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt
     )
 
-    if weather.get("alerts"):
-        alerts_html = " | ".join(
-            f'<span style="color:#e74c3c;">⚠ {alert}</span>'
-            for alert in weather["alerts"]
-        )
-    else:
-        alerts_html = '<span style="opacity:0.7;">None</span>'
+    html = response.text.strip()
 
-    weather_widget = f"""
-    <div style="
-        width: 100%;
-        background: #2c3e50;
-        border-top: 1px solid rgba(255,255,255,0.1);
-        border-bottom: 1px solid rgba(255,255,255,0.1);
-        color: white;
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        gap: 48px;
-        padding: 18px 40px;
-        box-sizing: border-box;
-        flex-wrap: wrap;
-    ">
-        <div style="text-align:center;">
-            <div style="font-size:0.7em; text-transform:uppercase; letter-spacing:1px; opacity:0.6;">Temperature</div>
-            <div style="font-size:1.6em; font-weight:bold;">{weather.get('temperature', 'N/A')}</div>
-        </div>
-        <div style="text-align:center;">
-            <div style="font-size:0.7em; text-transform:uppercase; letter-spacing:1px; opacity:0.6;">Conditions</div>
-            <div style="font-size:1.1em;">{weather.get('conditions', 'N/A')}</div>
-        </div>
-        <div style="text-align:center;">
-            <div style="font-size:0.7em; text-transform:uppercase; letter-spacing:1px; opacity:0.6;">Wind</div>
-            <div style="font-size:1.1em;">{weather.get('wind', 'N/A')}</div>
-        </div>
-        <div style="text-align:center;">
-            <div style="font-size:0.7em; text-transform:uppercase; letter-spacing:1px; opacity:0.6;">Alerts</div>
-            <div style="font-size:0.9em;">{alerts_html}</div>
-        </div>
-    </div>
-    """
+    # Strip markdown code fences if Gemini wraps the output anyway
+    if html.startswith("```"):
+        html = html.split("\n", 1)[1]
+    if html.endswith("```"):
+        html = html.rsplit("```", 1)[0]
+        
+    return response.text
 
-    if restaurants:
-        restaurant_cards = "".join(f"""
-        <div style="
-            background: white;
-            border-radius: 10px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-            padding: 20px;
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
-        ">
-            <div style="font-size:1.1em; font-weight:bold; color:#2c3e50;">{r['name']}</div>
-            <div style="font-size:0.85em; color:#e67e22; font-style:italic;">{r['cuisine']}</div>
-            {'<div style="font-size:0.82em; color:#666;">' + r['address'].strip() + '</div>' if r['address'].strip() else ''}
-            {'<div style="font-size:0.82em; color:#666;"> ' + r['phone'] + '</div>' if r['phone'] else ''}
-            {'<div style="font-size:0.82em; color:#666;"> ' + r['opening_hours'] + '</div>' if r['opening_hours'] else ''}
-            {'<div style="font-size:0.82em;"><a href="' + r['website'] + '" style="color:#2980b9;" target="_blank"> Website</a></div>' if r['website'] else ''}
-        </div>
-        """ for r in restaurants)
+# def build_brochure_html(city: str, image_urls: list[str], weather: dict, restaurants: list[dict], attractions: list[dict]) -> str:
+#     count = len(image_urls)
 
-        restaurants_section = f"""
-        <div class="section">
-            <h2>Where to Eat</h2>
-            <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap:16px; margin-top:20px;">
-                {restaurant_cards}
-            </div>
-        </div>
-        """
-    else:
-        restaurants_section = ""
+#     if count == 1:
+#         grid_style = "grid-template-columns: 1fr;"
+#     elif count == 2:
+#         grid_style = "grid-template-columns: 1fr 1fr;"
+#     elif count == 3:
+#         grid_style = "grid-template-columns: 1fr 1fr 1fr;"
+#     else:
+#         grid_style = "grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));"
+    
+#     images_html = "".join(
+#         f'<img src="{url}" style="width:100%; height:220px; object-fit:cover; border-radius:8px;"/>'
+#         for url in image_urls
+#     )
 
-    if attractions:
-        attraction_cards = "".join(f"""
-        <div style="
-            background: white;
-            border-radius: 10px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-            padding: 20px;
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
-        ">
-            <div style="font-size:1.1em; font-weight:bold; color:#2c3e50;">{a['name']}</div>
-            <div style="font-size:0.85em; color:#27ae60; font-style:italic;">{a['type']}</div>
-            {'<div style="font-size:0.82em; color:#666;">' + a['address'] + '</div>' if a['address'] else ''}
-            {'<div style="font-size:0.82em; color:#555;">' + a['description'] + '</div>' if a['description'] else ''}
-            {'<div style="font-size:0.82em; color:#666;">' + a['opening_hours'] + '</div>' if a['opening_hours'] else ''}
-            {'<div style="font-size:0.82em;"><a href="' + a['website'] + '" style="color:#2980b9;" target="_blank">Website</a></div>' if a['website'] else ''}
-        </div>
-        """ for a in attractions)
+#     if weather.get("alerts"):
+#         alerts_html = " | ".join(
+#             f'<span style="color:#e74c3c;">⚠ {alert}</span>'
+#             for alert in weather["alerts"]
+#         )
+#     else:
+#         alerts_html = '<span style="opacity:0.7;">None</span>'
 
-        attractions_section = f"""
-        <div class="section">
-            <h2>Things to Do</h2>
-            <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap:16px; margin-top:20px;">
-                {attraction_cards}
-            </div>
-        </div>
-        """
-    else:
-        attractions_section = ""
+#     weather_widget = f"""
+#     <div style="
+#         width: 100%;
+#         background: #2c3e50;
+#         border-top: 1px solid rgba(255,255,255,0.1);
+#         border-bottom: 1px solid rgba(255,255,255,0.1);
+#         color: white;
+#         display: flex;
+#         justify-content: center;
+#         align-items: center;
+#         gap: 48px;
+#         padding: 18px 40px;
+#         box-sizing: border-box;
+#         flex-wrap: wrap;
+#     ">
+#         <div style="text-align:center;">
+#             <div style="font-size:0.7em; text-transform:uppercase; letter-spacing:1px; opacity:0.6;">Temperature</div>
+#             <div style="font-size:1.6em; font-weight:bold;">{weather.get('temperature', 'N/A')}</div>
+#         </div>
+#         <div style="text-align:center;">
+#             <div style="font-size:0.7em; text-transform:uppercase; letter-spacing:1px; opacity:0.6;">Conditions</div>
+#             <div style="font-size:1.1em;">{weather.get('conditions', 'N/A')}</div>
+#         </div>
+#         <div style="text-align:center;">
+#             <div style="font-size:0.7em; text-transform:uppercase; letter-spacing:1px; opacity:0.6;">Wind</div>
+#             <div style="font-size:1.1em;">{weather.get('wind', 'N/A')}</div>
+#         </div>
+#         <div style="text-align:center;">
+#             <div style="font-size:0.7em; text-transform:uppercase; letter-spacing:1px; opacity:0.6;">Alerts</div>
+#             <div style="font-size:0.9em;">{alerts_html}</div>
+#         </div>
+#     </div>
+#     """
+
+#     if restaurants:
+#         restaurant_cards = "".join(f"""
+#         <div style="
+#             background: white;
+#             border-radius: 10px;
+#             box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+#             padding: 20px;
+#             display: flex;
+#             flex-direction: column;
+#             gap: 6px;
+#         ">
+#             <div style="font-size:1.1em; font-weight:bold; color:#2c3e50;">{r['name']}</div>
+#             <div style="font-size:0.85em; color:#e67e22; font-style:italic;">{r['cuisine']}</div>
+#             {'<div style="font-size:0.82em; color:#666;">' + r['address'].strip() + '</div>' if r['address'].strip() else ''}
+#             {'<div style="font-size:0.82em; color:#666;"> ' + r['phone'] + '</div>' if r['phone'] else ''}
+#             {'<div style="font-size:0.82em; color:#666;"> ' + r['opening_hours'] + '</div>' if r['opening_hours'] else ''}
+#             {'<div style="font-size:0.82em;"><a href="' + r['website'] + '" style="color:#2980b9;" target="_blank"> Website</a></div>' if r['website'] else ''}
+#         </div>
+#         """ for r in restaurants)
+
+#         restaurants_section = f"""
+#         <div class="section">
+#             <h2>Where to Eat</h2>
+#             <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap:16px; margin-top:20px;">
+#                 {restaurant_cards}
+#             </div>
+#         </div>
+#         """
+#     else:
+#         restaurants_section = ""
+
+#     if attractions:
+#         attraction_cards = "".join(f"""
+#         <div style="
+#             background: white;
+#             border-radius: 10px;
+#             box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+#             padding: 20px;
+#             display: flex;
+#             flex-direction: column;
+#             gap: 6px;
+#         ">
+#             <div style="font-size:1.1em; font-weight:bold; color:#2c3e50;">{a['name']}</div>
+#             <div style="font-size:0.85em; color:#27ae60; font-style:italic;">{a['type']}</div>
+#             {'<div style="font-size:0.82em; color:#666;">' + a['address'] + '</div>' if a['address'] else ''}
+#             {'<div style="font-size:0.82em; color:#555;">' + a['description'] + '</div>' if a['description'] else ''}
+#             {'<div style="font-size:0.82em; color:#666;">' + a['opening_hours'] + '</div>' if a['opening_hours'] else ''}
+#             {'<div style="font-size:0.82em;"><a href="' + a['website'] + '" style="color:#2980b9;" target="_blank">Website</a></div>' if a['website'] else ''}
+#         </div>
+#         """ for a in attractions)
+
+#         attractions_section = f"""
+#         <div class="section">
+#             <h2>Things to Do</h2>
+#             <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap:16px; margin-top:20px;">
+#                 {attraction_cards}
+#             </div>
+#         </div>
+#         """
+#     else:
+#         attractions_section = ""
 
 
-    return f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>{city} Travel Brochure</title>
-            <style>
-                body {{
-                    font-family: Georgia, serif;
-                    margin: 0;
-                    padding: 0;
-                    background: #fafafa;
-                    color: #222;
-                }}
-                .hero {{
-                    position: relative;
-                    background: #2c3e50;
-                    color: white;
-                    text-align: center;
-                    padding: 60px 20px;
-                }}
-                .hero h1 {{
-                    font-size: 3em;
-                    margin: 0;
-                    letter-spacing: 2px;
-                }}
-                .hero p {{
-                    font-size: 1.2em;
-                    opacity: 0.8;
-                }}
-                .section {{
-                    max-width: 1100px;
-                    margin: 40px auto;
-                    padding: 0 20px;
-                }}
-                .image-grid {{
-                    display: grid;
-                    {grid_style}
-                    gap: 16px;
-                    margin-top: 20px;
-                }}
-                h2 {{
-                    border-bottom: 2px solid #2c3e50;
-                    padding-bottom: 8px;
-                }}
-            </style>
-        </head>
-        <body>
-            <div class="hero">
-                <h1>{city}</h1>
-                <p>Discover the beauty and culture of {city}</p>
-            </div>
-            {weather_widget}
+#     return f"""
+#         <!DOCTYPE html>
+#         <html>
+#         <head>
+#             <title>{city} Travel Brochure</title>
+#             <style>
+#                 body {{
+#                     font-family: Georgia, serif;
+#                     margin: 0;
+#                     padding: 0;
+#                     background: #fafafa;
+#                     color: #222;
+#                 }}
+#                 .hero {{
+#                     position: relative;
+#                     background: #2c3e50;
+#                     color: white;
+#                     text-align: center;
+#                     padding: 60px 20px;
+#                 }}
+#                 .hero h1 {{
+#                     font-size: 3em;
+#                     margin: 0;
+#                     letter-spacing: 2px;
+#                 }}
+#                 .hero p {{
+#                     font-size: 1.2em;
+#                     opacity: 0.8;
+#                 }}
+#                 .section {{
+#                     max-width: 1100px;
+#                     margin: 40px auto;
+#                     padding: 0 20px;
+#                 }}
+#                 .image-grid {{
+#                     display: grid;
+#                     {grid_style}
+#                     gap: 16px;
+#                     margin-top: 20px;
+#                 }}
+#                 h2 {{
+#                     border-bottom: 2px solid #2c3e50;
+#                     padding-bottom: 8px;
+#                 }}
+#             </style>
+#         </head>
+#         <body>
+#             <div class="hero">
+#                 <h1>{city}</h1>
+#                 <p>Discover the beauty and culture of {city}</p>
+#             </div>
+#             {weather_widget}
 
-            <div class="section">
-                <h2>Gallery</h2>
-                <div class="image-grid">
-                    {images_html}
-                </div>
-            </div>
-            {attractions_section}
-            {restaurants_section}
-        </body>
-        </html>
-        """
+#             <div class="section">
+#                 <h2>Gallery</h2>
+#                 <div class="image-grid">
+#                     {images_html}
+#                 </div>
+#             </div>
+#             {attractions_section}
+#             {restaurants_section}
+#         </body>
+#         </html>
+#         """
 
 
 async def main():

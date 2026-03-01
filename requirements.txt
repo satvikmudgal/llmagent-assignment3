@@ -1,3 +1,4 @@
 mcp
 google-genai
 python-dotenv
+requests

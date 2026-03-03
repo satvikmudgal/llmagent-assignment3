@@ -3,6 +3,7 @@ import socket
 import threading 
 import requests
 import os
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from mcp.server.models import InitializationOptions
 from mcp.server import NotificationOptions, Server
@@ -24,6 +25,24 @@ HTML_CONTENT = """
 </body>
 </html>
 """
+
+def safe_get(url, **kwargs):
+    try:
+        response = requests.get(url, timeout=5, **kwargs)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        print("GET request failed:", e)
+        return None
+    
+def safe_post(url, **kwargs):
+    try:
+        response = requests.post(url, timeout=100, **kwargs)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        print("POST request failed:", e)
+        return None
 
 @server.list_tools()
 async def handle_list_tools():
@@ -64,14 +83,32 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
         query_type = arguments.get("query_type", "city")
         cuisine = arguments.get("cuisine", None)
         attraction_type = arguments.get("attraction_type", None)
+        geo_data = geocode_city(city_name)
+
+        lat = geo_data["lat"]
+        lon = geo_data["lon"]
+        bbox = geo_data["boundingbox"]
         
-        image_urls = fetch_unsplash_images(city_name, query_type)
-        weather = fetch_nws_weather(city_name)
-        if "error" in weather:
+        try:
+            image_urls = fetch_unsplash_images(city_name, query_type)
+        except:
+            image_urls = []
+
+        try:
+            weather = fetch_nws_weather(lat, lon)
+        except:
             weather = {"temperature": "N/A", "conditions": "Unavailable", "wind": "N/A", "alerts": []}
 
-        restaurants = fetch_restaurants(city_name, cuisine)
-        attractions = fetch_tourist_attractions(city_name, attraction_type)
+        try:
+            restaurants = fetch_restaurants(bbox, cuisine)
+        except:
+            restaurants = []
+        time.sleep(5)
+
+        try:
+            attractions = fetch_tourist_attractions(bbox, attraction_type)
+        except:
+            attractions = []
 
         #html = build_brochure_html(city_name, image_urls, weather, restaurants, attractions)
 
@@ -120,15 +157,16 @@ def start_web_server(port):
 
 def fetch_unsplash_images(city: str, query_type: str = "city", count: int = 6) -> list[str]:
     access_key = os.getenv("UNSPLASH_ACCESS_KEY")
-    response = requests.get(
+    data = safe_get(
         "https://api.unsplash.com/search/photos",
         params={"query": f"{city} {query_type}", "per_page": count, "orientation": "landscape"},
         headers={"Authorization": f"Client-ID {access_key}"}
     )
-    data = response.json()
+    if not data:
+        return []
     return [photo["urls"]["regular"] for photo in data.get("results", [])]
 
-def fetch_nws_weather(city: str) -> dict:
+def fetch_nws_weather(lat: float, lon: float) -> dict:
     """
     Fetches weather data from the National Weather Service API.
     Requires a geocoding step first to convert city name to latitude and longitude,
@@ -137,44 +175,38 @@ def fetch_nws_weather(city: str) -> dict:
 
     headers = {"User-Agent": "city-brochure-app/1.0"}
 
-    geo_response = requests.get(
-        "https://nominatim.openstreetmap.org/search",
-        params={"q": city, "format": "json", "limit": 1},
-        headers=headers
-    )
-    geo_data = geo_response.json()
-    if not geo_data:
-        return {"error": f"Could not geocode city: {city}"}
-    
-    lat = float(geo_data[0]["lat"])
-    lon = float(geo_data[0]["lon"])
-
-    points_response = requests.get(
+    points_data = safe_get(
         f"https://api.weather.gov/points/{lat:.4f},{lon:.4f}",
         headers=headers
     )
-
-    points_data = points_response.json()
-    if "properties" not in points_data:
-        return {"error": "Could not retrieve NWS grid point."}
+    if not points_data or "properties" not in points_data:
+        return {"temperature": "N/A", "conditions": "Unavailable", "wind": "N/A", "alerts": []}
     
     forecast_url = points_data["properties"]["forecast"]
     alerts_zone = points_data["properties"]["county"]
 
-    forecast_response = requests.get(forecast_url, headers=headers)
-    forecast_data = forecast_response.json()
-    periods = forecast_data["properties"]["periods"]
+    forecast_data = safe_get(forecast_url, headers=headers)
+    if not forecast_data or "properties" not in forecast_data:
+        return {"temperature": "N/A", "conditions": "Unavailable", "wind": "N/A", "alerts": []}
+
+    periods = forecast_data["properties"].get("periods", [])
+    if not periods:
+        return {"temperature": "N/A", "conditions": "Unavailable", "wind": "N/A", "alerts": []}
+
     current = periods[0]
 
     zone_id = alerts_zone.split("/")[-1]
-    alerts_response = requests.get(
+    alerts_data = safe_get(
         f"https://api.weather.gov/alerts/active?zone={zone_id}",
         headers=headers
     )
-    alerts_data = alerts_response.json()
-    alerts = [
-        feature["properties"]["headline"] for feature in alerts_data.get("features", [])
-    ]
+
+    alerts = []
+    if alerts_data and "features" in alerts_data:
+        alerts = [
+            feature["properties"]["headline"]
+            for feature in alerts_data.get("features", [])
+        ]
 
     return {
         "temperature": f"{current['temperature']} degrees {current['temperatureUnit']}",
@@ -183,22 +215,12 @@ def fetch_nws_weather(city: str) -> dict:
         "alerts": alerts
     }
 
-def fetch_restaurants(city: str, cuisine: str = None, count: int = 8) -> list[dict]:
+def fetch_restaurants(bbox: list[str], cuisine: str = None, count: int = 8) -> list[dict]:
     """
     Fetches restaurants from OpenStreetMap via the Overpass API
     Optionally filters by cuisine type.
     """
 
-    geo_response = requests.get(
-        "https://nominatim.openstreetmap.org/search",
-        params={"q": city, "format": "json", "limit": 1},
-        headers={"User-Agent": "city-brochure-app/1.0"}
-    )
-    geo_data = geo_response.json()
-    if not geo_data:
-        return []
-    
-    bbox = geo_data[0]["boundingbox"]
     south, north, west, east = bbox
 
     cuisine_filter = f'["cuisine"="{cuisine.lower()}"]' if cuisine else '["cuisine"]'
@@ -210,12 +232,14 @@ def fetch_restaurants(city: str, cuisine: str = None, count: int = 8) -> list[di
     out {count};
     """
 
-    overpass_response = requests.post(
+    overpass_data = safe_post(
         "https://overpass-api.de/api/interpreter",
         data={"data": overpass_query},
         headers={"User-Agent": "city-brochure-app/1.0"}
     )
-    overpass_data = overpass_response.json()
+
+    if not overpass_data:
+        return []
 
     restaurants = []
     for element in overpass_data.get("elements", []):
@@ -234,20 +258,10 @@ def fetch_restaurants(city: str, cuisine: str = None, count: int = 8) -> list[di
 
     return restaurants
 
-def fetch_tourist_attractions(city: str, attraction_type: str = None, count: int = 8) -> list[dict]:
+def fetch_tourist_attractions(bbox: list[str], attraction_type: str = None, count: int = 8) -> list[dict]:
     """Fetches tourist attractions from OpenStreetMap via the Overpass API.
     Optionally filters by attraction type.
     """
-    geo_response = requests.get(
-        "https://nominatim.openstreetmap.org/search",
-        params={"q": city, "format": "json", "limit": 1},
-        headers={"User-Agent": "city-brochure-app/1.0"}
-    )
-    geo_data = geo_response.json()
-    if not geo_data:
-        return []
-
-    bbox = geo_data[0]["boundingbox"]
     south, north, west, east = bbox
 
     type_filter = f'["tourism"="{attraction_type.lower()}"]' if attraction_type else '["tourism"]'
@@ -259,12 +273,14 @@ def fetch_tourist_attractions(city: str, attraction_type: str = None, count: int
     out {count};
     """
 
-    overpass_response = requests.post(
+    overpass_data = safe_post(
         "https://overpass-api.de/api/interpreter",
         data={"data": overpass_query},
         headers={"User-Agent": "city-brochure-app/1.0"}
     )
-    overpass_data = overpass_response.json()
+
+    if not overpass_data:
+        return []
 
     attractions = []
     for element in overpass_data.get("elements", []):
@@ -282,6 +298,26 @@ def fetch_tourist_attractions(city: str, attraction_type: str = None, count: int
         })
 
     return attractions
+
+def geocode_city(city: str) -> dict | None:
+    headers = {"User-Agent": "city-brochure-app/1.0"}
+    
+    geo_data = safe_get(
+        "https://nominatim.openstreetmap.org/search",
+        params={"q": city, "format": "json", "limit": 1},
+        headers=headers
+    )
+
+    if not geo_data:
+        return None
+
+    result = geo_data[0]
+
+    return {
+        "lat": float(result["lat"]),
+        "lon": float(result["lon"]),
+        "boundingbox": result["boundingbox"]  # south, north, west, east
+    }
 
 def generate_dynamic_html(city, data_package):
     """Uses Gemini to turn raw data into a presentable HTML string."""
